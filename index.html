@@ -526,95 +526,105 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
   if(typeof module==='object'&&module.exports)module.exports=api;else root.PinkAI=api;
 })(globalThis,function(M){
   'use strict';
-  const levels={casual:{reaction:.48,predict:.1,dodge:.42},normal:{reaction:.3,predict:.22,dodge:.7},tactical:{reaction:.22,predict:.32,dodge:.88}};
-  const melee=e=>['dog','pig','patrick','mahoraga'].includes(e.kind)||['zhan','bear','traitor','sukuna'].includes(e.fighter.role.id);
+  const levels={casual:{reaction:.26},normal:{reaction:.18},tactical:{reaction:.14}};
+  const closeRoles=new Set(['zhan','bear','traitor','xiaoyi','yuji','toji','mahito','hakari','orsted','higuruma','nanami','todo','yuki','naoya']);
+  const closeSummons=new Set(['dog','pig','patrick','mahoraga','rika','fish','transfigured','divine-dog','curse-claw']);
+  const melee=e=>e.isSummon?closeSummons.has(e.kind):closeRoles.has(e.fighter.role.id);
   // Steering never changes HP, damage, cooldowns, or an entity's base speed.
   function speed(e){const id=e.fighter.role.id;return e.fighter.role.speed||(e.kind==='dog'?260:e.kind==='pig'?188:e.kind==='patrick'?225:e.kind==='mahoraga'?180:id==='bear'?210:id==='sukuna'?175:melee(e)?165:e.kind==='friend'?143:148);}
+  const distance=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+  const eligible=(e,t)=>t?.alive&&!t.heldBy&&t.side!==e.side&&t.kind!=='dragon';
+  const locked=(w,e)=>w.entities.find(t=>t.id===e.aiTarget&&eligible(e,t));
   function target(w,e){
-    const enemies=w.targets(e.side);let best=null,value=Infinity;
-    for(const t of enemies){
-      const d=Math.hypot(t.x-e.x,t.y-e.y);
-      const rootPreference=['cc','zhaozhao'].includes(e.fighter.role.id)&&t.isSummon?220:0;
-      const focused=w.entities.filter(a=>a.alive&&a.side===e.side&&a.id!==e.id&&a.aiTarget===t.id&&Math.hypot(a.x-e.x,a.y-e.y)<280).length;
-      const score=d+(t.fighter.hp/t.fighter.maxHp)*55-Math.min(3,focused)*23+rootPreference;
-      if(score<value){value=score;best=t;}
-    }return best;
+    const current=locked(w,e);
+    let best=null,score=Infinity;
+    for(const t of w.entities){
+      if(!eligible(e,t))continue;
+      const wall=M.rayHit(w.map,e.x,e.y,t.x,t.y);
+      const cost=distance(e,t)+(wall?96:0)+(t.isSummon?38:0)-(t===current?65:0);
+      if(cost<score){best=t;score=cost;}
+    }
+    return best;
   }
-  function waypoint(w,e,tx,ty){
-    const blocked=M.rayHit(w.map,e.x,e.y,tx,ty,e.radius+6);if(!blocked)return{x:tx,y:ty};
-    const g=blocked.obstacle,pad=e.radius+18;
-    let points=g.shape==='rect'?[[g.x-pad,g.y-pad],[g.x+g.w+pad,g.y-pad],[g.x-pad,g.y+g.h+pad],[g.x+g.w+pad,g.y+g.h+pad]]:Array.from({length:8},(_,i)=>{const a=i*Math.PI/4;return[g.x+Math.cos(a)*(g.r+pad+9),g.y+Math.sin(a)*(g.r+pad+9)];});
-    points=points.filter(([x,y])=>M.isOpen(w.map,x,y,e.radius)&&!M.rayHit(w.map,e.x,e.y,x,y,e.radius+3));
-    points.sort((a,b)=>(Math.hypot(a[0]-e.x,a[1]-e.y)+Math.hypot(a[0]-tx,a[1]-ty))-(Math.hypot(b[0]-e.x,b[1]-e.y)+Math.hypot(b[0]-tx,b[1]-ty)));
-    return points.length?{x:points[0][0],y:points[0][1]}:{x:e.x-e.vy*.4,y:e.y+e.vx*.4};
+  const clear=(map,a,b,r)=>!M.rayHit(map,a.x,a.y,b.x,b.y,r);
+  function waypoint(w,e,goal){
+    const map=w.map,r=e.radius,pad=r+12;
+    if(clear(map,e,goal,r-2))return goal;
+    const points=map.obstacles.flatMap(g=>{
+      if(g.shape==='rect')return [
+        {x:g.x-pad,y:g.y-pad},{x:g.x+g.w+pad,y:g.y-pad},
+        {x:g.x-pad,y:g.y+g.h+pad},{x:g.x+g.w+pad,y:g.y+g.h+pad}
+      ];
+      const span=(g.r+pad)/Math.cos(Math.PI/12);
+      return Array.from({length:12},(_,i)=>{
+        const angle=i*Math.PI/6;
+        return {x:g.x+span*Math.cos(angle),y:g.y+span*Math.sin(angle)};
+      });
+    }).filter(p=>M.isOpen(map,p.x,p.y,r+3));
+    points.unshift(e);points.push(goal);
+    const costs=points.map(()=>Infinity),visited=new Set(),first=[];
+    costs[0]=0;
+    for(let i=0;i<points.length;i++){
+      let from=-1;
+      for(let j=0;j<points.length;j++){
+        if(!visited.has(j)&&costs[j]<(from<0?Infinity:costs[from]))from=j;
+      }
+      if(from<0)break;
+      if(from===points.length-1)return first[from];
+      visited.add(from);
+      for(let to=1;to<points.length;to++){
+        if(visited.has(to))continue;
+        const cost=costs[from]+distance(points[from],points[to]);
+        if(cost>=costs[to]||!clear(map,points[from],points[to],r-2))continue;
+        costs[to]=cost;first[to]=from===0?points[to]:first[from];
+      }
+    }
+    const hit=M.rayHit(map,e.x,e.y,goal.x,goal.y,r-2);
+    const tangent={x:e.x-hit.ny*44,y:e.y+hit.nx*44};
+    return M.isOpen(map,tangent.x,tangent.y,r)?tangent:{x:e.x+hit.ny*44,y:e.y-hit.nx*44};
+  }
+  function refresh(w,e){
+    if(!w.ai.enabled||e.kind==='dragon')return;
+    if(w.time<(e.aiReady||0)&&(e.aiTarget===null||locked(w,e)))return;
+    const enemy=target(w,e);
+    e.aiTarget=enemy?.id??null;
+    e.aiReady=w.time+(levels[w.ai.level]||levels.normal).reaction+(e.id%5)*.012;
+    e.aiRoute=null;
+    if(enemy)w.ai.decisions++;
   }
   function steer(w,e,dt,ground){
-    if(!w.ai.enabled||e.kind==='dragon'||e.jetLeft>0)return false;
-    const spec=levels[w.ai.level]||levels.normal;
-    // Briefly circle after contact so collision specialists can make a new
-    // approach instead of staying pressed against a moving opponent.
-    if(e.fighter.role.id==='zhan'&&e.kind==='main'){
-      const foe=target(w,e);
-      if(foe&&Math.hypot(foe.x-e.x,foe.y-e.y)<54&&w.time>=(e.orbitReady||0)){
-        e.orbitReady=w.time+.8;e.orbitUntil=w.time+.12;
-        e.orbitAngle=Math.atan2(foe.y-e.y,foe.x-e.x)+(e.id%2?1:-1)*Math.PI*.7;
-      }
-      if(e.orbitUntil>w.time){e.aiAngle=e.orbitAngle;e.aiClock=.05;}
+    const foe=locked(w,e);
+    if(!foe||e.jetLeft>0||e.burstUntil>w.time)return;
+    const d=distance(e,foe),close=melee(e);
+    const lead=close?Math.min(.48,d/480):0;
+    const danger=w.fields.find(f=>f.life>0&&f.side!==e.side&&
+      ['shrine-domain','meteor-warning','boss-warning','body-repel-warning'].includes(f.type)&&distance(e,f)<f.radius+e.radius);
+    const threatDistance=danger?distance(e,danger)||1:1;
+    const goal=danger
+      ?M.openSpot(w.map,e.x+(e.x-danger.x)*150/threatDistance,e.y+(e.y-danger.y)*150/threatDistance,e.radius)
+      :M.openSpot(w.map,foe.x+foe.vx*lead,foe.y+foe.vy*lead,e.radius);
+    const direct=clear(w.map,e,goal,e.radius-2);
+    let point=goal,pace=1,action=danger?'evade':'approach';
+    if(!direct){
+      if(!e.aiRoute||distance(e,e.aiRoute)<20)e.aiRoute=waypoint(w,e,goal);
+      point=e.aiRoute;action='flank';
+    }else if(!danger&&!close&&d<170){
+      const x=(foe.x-e.x)/(d||1),y=(foe.y-e.y)/(d||1),sign=e.id%2?1:-1;
+      const orbit=s=>({x:e.x-y*s*66+x*16,y:e.y+x*s*66+y*16});
+      const canOrbit=p=>M.isOpen(w.map,p.x,p.y,e.radius)&&clear(w.map,e,p,e.radius-2);
+      const p=orbit(sign),q=orbit(-sign);
+      point=canOrbit(p)?p:canOrbit(q)?q:goal;
+      pace=.76;action='strafe';
     }
-    e.aiClock=(e.aiClock||0)-dt;
-    if(e.aiClock<=0){
-      e.aiClock=spec.reaction*(.85+w.aiRandom()*.35);
-      const foe=target(w,e);if(!foe)return false;e.aiTarget=foe.id;
-      const pursuit=e.fighter.role.id==='zhan'?.3:0;
-      const tx=foe.x+foe.vx*pursuit,ty=foe.y+foe.vy*pursuit,d=Math.hypot(tx-e.x,ty-e.y)||1,dx=(tx-e.x)/d,dy=(ty-e.y)/d;
-      let vx=dx,vy=dy,action='接近';
-      const kiteRange=e.fighter.role.id==='cc'?360:e.fighter.role.id==='summer'?285:e.fighter.role.id==='zhaozhao'?235:185;
-      if(!melee(e)&&d<kiteRange){
-        const strafe=e.aiStrafe||(e.aiStrafe=w.aiRandom()<.5?-1:1);
-        const retreat=d<kiteRange*.52?-.7:d<kiteRange*.76?-.25:.12;
-        vx=dx*retreat-dy*strafe*.8;vy=dy*retreat+dx*strafe*.8;action='侧翼';
-      }
-      // Notice only visible threats already in flight, not future casts or hidden drafts.
-      let danger=null,when=Infinity;
-      for(const p of w.projectiles){
-        if(p.dead||p.side===e.side||p.guaranteed||Math.hypot(p.x-e.x,p.y-e.y)>250||M.rayHit(w.map,e.x,e.y,p.x,p.y,0))continue;
-        const rx=p.x-e.x,ry=p.y-e.y,rvx=p.vx-e.vx,rvy=p.vy-e.vy,v2=rvx*rvx+rvy*rvy;
-        const t=v2?-(rx*rvx+ry*rvy)/v2:-1;
-        if(t<.06||t>.55)continue;
-        if(Math.hypot(rx+rvx*t,ry+rvy*t)<e.radius+p.radius+17&&t<when){danger=p;when=t;}
-      }
-      if(danger&&w.time>=(e.aiDodgeReady||0)&&!(melee(e)&&d<115)&&w.aiRandom()<spec.dodge){
-        const len=Math.hypot(danger.vx,danger.vy)||1;let sign=w.aiRandom()<.5?-1:1;
-        const ax=-danger.vy/len,ay=danger.vx/len;
-        if(!M.isOpen(w.map,e.x+ax*sign*70,e.y+ay*sign*70,e.radius))sign=-sign;
-        vx=ax*sign;vy=ay*sign;action='闪避';e.aiDodgeReady=w.time+.85+w.aiRandom()*.4;w.ai.dodges++;
-      }
-      for(const field of w.fields){
-        if(field.side===e.side||!['boss-warning','shrine-domain','blue-well'].includes(field.type))continue;
-        const distance=Math.hypot(e.x-field.x,e.y-field.y);
-        if(distance<field.radius+55){
-          const n=distance||1;vx=(e.x-field.x)/n;vy=(e.y-field.y)/n;action='避险';break;
-        }
-      }
-      for(const z of w.map.zones){
-        if(z.kind==='lava'&&!e.fighter.role.fireproof&&M.contains(z,e.x,e.y,20)){
-          const cx=z.shape==='circle'?z.x:z.x+z.w/2,cy=z.shape==='circle'?z.y:z.y+z.h/2,n=Math.hypot(e.x-cx,e.y-cy)||1;
-          vx=(e.x-cx)/n;vy=(e.y-cy)/n;action='避险';
-        }
-      }
-      const ally=w.entities.find(a=>a.alive&&a.side===e.side&&a.id!==e.id&&Math.hypot(a.x-e.x,a.y-e.y)<240&&a.fighter.hp/a.fighter.maxHp<.28);
-      if(ally&&melee(e)&&action==='接近'&&w.aiRandom()<.38){const threat=target(w,ally);if(threat){vx=threat.x-e.x;vy=threat.y-e.y;action='援护';w.ai.supports++;}}
-      const norm=Math.hypot(vx,vy)||1;
-      const point=waypoint(w,e,e.x+vx/norm*120,e.y+vy/norm*120);
-      let ax=point.x-e.x,ay=point.y-e.y;
-      for(const a of w.entities)if(a.alive&&a.id!==e.id&&a.side===e.side){const dist=Math.hypot(e.x-a.x,e.y-a.y);if(dist>1&&dist<75){ax+=(e.x-a.x)/dist*30;ay+=(e.y-a.y)/dist*30;}}
-      e.aiAngle=Math.atan2(ay,ax)+(w.aiRandom()-.5)*.23;e.aiAction=action;w.ai.decisions++;
-    }
-    const current=Math.atan2(e.vy,e.vx),desired=e.aiAngle??current,delta=Math.atan2(Math.sin(desired-current),Math.cos(desired-current));
-    const angle=current+Math.max(-dt*(ground.ice?2:6),Math.min(dt*(ground.ice?2:6),delta));
-    e.vx=Math.cos(angle)*speed(e);e.vy=Math.sin(angle)*speed(e);return true;
+    const current=Math.atan2(e.vy,e.vx),desired=Math.atan2(point.y-e.y,point.x-e.x);
+    const delta=Math.atan2(Math.sin(desired-current),Math.cos(desired-current));
+    const maxTurn=dt*(ground.ice?3:8);
+    const angle=current+Math.max(-maxTurn,Math.min(maxTurn,delta));
+    const magnitude=speed(e)*pace;
+    e.vx=Math.cos(angle)*magnitude;e.vy=Math.sin(angle)*magnitude;
+    e.aiAction=action;
   }
-  return{levels,melee,speed,target,steer,waypoint};
+  return{levels,melee,speed,target,locked,refresh,steer,waypoint};
 });
 </script><script>(function(root,factory){
  const api=factory();if(typeof module==='object'&&module.exports)module.exports=api;else root.PinkCanon=api;
@@ -625,7 +635,7 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
   gojo:{focus:'无下限先挡、苍改距离、赫排斥、茈贯穿。领域的信息洪流和普通拳击是两回事。',hits:{'gojo-blue-fist':1.85,blue:1.55,red:2.10,purple:2.40},domain:[8,285]},
   sukuna:{focus:'解、捌的条件不同；开须先用过两种斩击。未用御厨子粉尘强化的火矢只指定单一目标，粉尘版才形成区域爆燃。',hits:{slash:1.30,'fire-arrow':1.75,'fire-splash':1.85,'world-slash':2.50},domain:[10,515]},
   yuji:{focus:'保留拳与咒力错位、灵魂边界斩击和未命名领域；仅本场已经打出黑闪后才有集中连击。',hits:{'soul-cut':1.26,'soul-domain':1.13},domain:[10,300]},
-  yuta:{focus:'里香完全显现恢复为五分钟；有限复制窗口、外置储备及剑阵分开。只采用已在项目实现的复制招式。',hits:{'rika-beam':1.48,'jacob-ladder':1.35,'love-domain':1.28},domain:[9,310]},
+  yuta:{focus:'里香完全显现为五分钟。真赝相爱的必中只锁开域选定目标，场内另有可拾取的复制术式剑。',hits:{'rika-beam':1.48,'jacob-ladder':1.35,'love-domain':1.28},domain:[9,310]},
   toji:{focus:'零咒力不等于反伤或免物理攻击。天逆鉾以接触破术，释魂刀打灵魂，不靠虚构咒力强化。',hits:{'soul-katana':1.25,'playful-cloud':1.32}},
   jogo:{focus:'漏瑚能以火砾虫和熔岩压迫普通术师；极之番「陨」是大范围可离开落点，绝不当成领域必中。',hits:{'maximum-meteor':2.20,'lava-shot':1.24,'insect-blast':1.30},domain:[9,320]},
   hanami:{focus:'咒种命中后会随受害者继续使用术式而增殖；花田负责剥夺战意，根系负责实打实的伤害。无自创领域。',hits:{'root-lance':1.15,'forest-beam':1.45}},
@@ -816,8 +826,39 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
  function effect(w,type,x,y,side,life=.7,extra={}){
   w.effects.push({type,x,y,side,life,maxLife:life,...extra});
  }
- function sureHit(w,source,target){
-  return w.fields.find(f=>active(w,f)&&f.type==='void-domain'&&f.sourceFighterId===source.id&&canTarget(f,target)&&inside(f,target)&&!contestedAt(w,f,target));
+ const guarded=(w,e)=>e&&(e.simpleUntil>w.time||e.hollowWickerUntil>w.time);
+ function defendDomain(w,e){
+  const id=e.fighter.role.id;
+  if(!['yuji','yuki','sukuna'].includes(id)||e.isSummon||e.heldBy||e.stunUntil>w.time||
+    e.gameUntil>w.time||e.voidLocked||e.domainGuardReady>w.time||e.simpleReady>w.time)return;
+  const hostile=domains(w).some(f=>f.type!=='gamble-domain'&&f.side!==e.side&&canTarget(f,e)&&
+    inside(f,e)&&!contestedAt(w,f,e));
+  if(!hostile)return;
+  const wicker=id==='sukuna';
+  e[wicker?'hollowWickerUntil':'simpleUntil']=w.time+2.8;
+  e.domainGuardReady=w.time+9;
+  effect(w,'simple-open',e.x,e.y,e.side,.8);
+  w.log(wicker?'彌虚葛籠':'简易领域','反领域手段暂时抵挡必中。',e.side);
+ }
+ function spendDomain(w,source,cost=45){
+  if(source.techniqueMutedUntil>w.time||(source.domainEnergy??100)<cost)return false;
+  source.domainEnergy=(source.domainEnergy??100)-cost;
+  return true;
+ }
+ function takeCopySword(w,e){
+  const field=w.fields.find(f=>f.type==='love-domain'&&f.sourceFighterId===e.fighterId&&active(w,f));
+  if(!field)return null;
+  const sword=field.copySwords.find(s=>!s.used&&Math.hypot(e.x-s.x,e.y-s.y)<=47);
+  if(!sword)return null;
+  sword.used=true;
+  return sword.kind;
+ }
+ function recoverDomains(w,dt){
+  const maintaining=new Set(w.fields.filter(f=>isDomain(f)&&f.life>0).map(f=>f.sourceFighterId));
+  for(const fighter of w.fighters){
+   if(fighter.domainEnergy==null||fighter.hp<=0||maintaining.has(fighter.id))continue;
+   fighter.domainEnergy=Math.min(100,fighter.domainEnergy+4.2*dt);
+  }
  }
  function prepare(w){
   const list=domains(w);
@@ -837,16 +878,19 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
     const d=Math.hypot(e.x-f.x,e.y-f.y),limit=f.radius-e.radius;
     if(d>limit){const p=Maps.openSpot(w.map,f.x+(e.x-f.x)/d*limit,f.y+(e.y-f.y)/d*limit,e.radius);e.x=p.x;e.y=p.y;}
     const touching=caster&&Math.hypot(e.x-caster.x,e.y-caster.y)<=e.radius+caster.radius+1;
-    if(f.type==='void-domain'&&!contestedAt(w,f,e)&&!touching){
+    if(f.type==='void-domain'&&!contestedAt(w,f,e)&&!touching&&!guarded(w,e)){
       Heroes.adapt(w,e,'void-domain');
-      if(!Heroes.immune(e,'void-domain')&&!(e.fighter.invulnerableUntil>w.time)&&!(e.simpleUntil>w.time))e.voidLocked=true;
+      if(!Heroes.immune(e,'void-domain')&&!(e.fighter.invulnerableUntil>w.time))e.voidLocked=true;
     }
    }
   }
  }
  function collapse(w,f,reason){
   if(f.life<=0)return;f.life=0;
-  const source=w.fighterById[f.sourceFighterId];if(source)source.domainBuffUntil=0;
+  const source=w.fighterById[f.sourceFighterId];
+  if(source&&f.domainCost&&!(f.type==='gamble-domain'&&f.reels==='777')){
+   source.techniqueMutedUntil=Math.max(source.techniqueMutedUntil||0,w.time+2.4);
+  }
   effect(w,'domain-break',f.x,f.y,f.side,1,{radius:f.radius,gojo:f.type==='void-domain'});
   w.log('领域解除',reason,f.side);
  }
@@ -854,6 +898,7 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
   if(!isDomain(f)&&f.type!=='blue-well')return false;
   const source=w.fighterById[f.sourceFighterId];
   if(!source||source.hp<=0){collapse(w,f,'施术者退场，领域消散。');f.life=0;return true;}
+  if(f.life<=dt&&isDomain(f)){collapse(w,f,'展开时间结束，术式暂时熔断。');return true;}
   f.life-=dt;f.clock-=dt;if(f.life<=0)return true;
   if(f.type==='blue-well'){
    for(const e of w.targets(f.side).filter(e=>inside(f,e))){
@@ -867,6 +912,7 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
   const breakRatio=['void-domain','shrine-domain'].includes(f.type)?.3:.45;
   if((f.damageAtOpen??source.damageTaken)-(source.damageTaken||0)<-source.maxHp*breakRatio){collapse(w,f,'施术者承受重创，术式无法维持。');return true;}
   if(!active(w,f))return true;
+  if(f.domainCost&&!spendDomain(w,source,dt*f.domainCost)){collapse(w,f,'维持所需的咒力不足，结界解除。');return true;}
   if(f.type!=='shrine-domain'){
    const pressure=domains(w).filter(other=>other.type==='shrine-domain'&&other.side!==f.side&&Math.hypot(other.x-f.x,other.y-f.y)+other.radius>f.radius+20&&Math.hypot(other.x-f.x,other.y-f.y)<other.radius+f.radius);
    if(pressure.length){f.barrierHp-=360*dt*pressure.length;f.barrierPressure=true;if(f.barrierHp<=0){collapse(w,f,'开放式领域从外侧击碎封闭领域结界。');return true;}}
@@ -888,15 +934,16 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
    }
    return true;
   }
-  if(f.clock>0)return true;f.clock=({'void-domain':.4,'shrine-domain':.18,'soul-domain':.6,'love-domain':.65,'volcano-domain':.65,'ocean-domain':.48,'mahito-domain':.65})[f.type];
+  if(f.type==='void-domain'||f.clock>0)return true;
+  f.clock=({'shrine-domain':.18,'soul-domain':.6,'love-domain':.65,'volcano-domain':.65,'ocean-domain':.48,'mahito-domain':.65})[f.type];
   for(const e of w.targets(f.side)){
-   if(!canTarget(f,e)||!inside(f,e)||contestedAt(w,f,e))continue;
-   if(f.type==='void-domain'&&!e.voidLocked)continue;
+   if(!canTarget(f,e)||!inside(f,e)||contestedAt(w,f,e)||guarded(w,e))continue;
+   if(f.type==='love-domain'&&e.id!==f.sureTargetId)continue;
    const slash=f.type==='shrine-domain',cleave=slash&&(e.isSummon||e.fighter.role.id!=='toji');
-   const base=({'void-domain':24,'shrine-domain':cleave?52+e.fighter.maxHp*.013:47,'soul-domain':135,'love-domain':82,'volcano-domain':92,'ocean-domain':76,'mahito-domain':120})[f.type];
+   const base=({'shrine-domain':cleave?52+e.fighter.maxHp*.013:47,'soul-domain':135,'love-domain':82,'volcano-domain':92,'ocean-domain':76,'mahito-domain':120})[f.type];
    const dealt=w.damage(e.side,damageFor(source,base),e,e,f.type,source,{sureHit:true,castToken:`domain:${f.id}`});
    if(f.type==='love-domain'&&dealt>0)e.fighter.techniqueMutedUntil=Math.max(e.fighter.techniqueMutedUntil||0,w.time+.45);
-   if(dealt>0)effect(w,['volcano-domain','ocean-domain','mahito-domain'].includes(f.type)?'exp-domain-hit':slash?'domain-slash':f.type==='soul-domain'?'soul-cut':f.type==='love-domain'?'love-hit':'void-hit',e.x,e.y,f.side,.38,{angle:(e.id*1.73+w.time*3)%Math.PI,style:f.type,cleave});
+   if(dealt>0)effect(w,['volcano-domain','ocean-domain','mahito-domain'].includes(f.type)?'exp-domain-hit':slash?'domain-slash':f.type==='soul-domain'?'soul-cut':'love-hit',e.x,e.y,f.side,.38,{angle:(e.id*1.73+w.time*3)%Math.PI,style:f.type,cleave});
    if(slash&&dealt>0){
     const caster=w.entities.find(b=>b.fighterId===source.id&&!b.isSummon);if(caster){caster.slashMarks=(caster.slashMarks||0)+1;caster.furnaceDust=Math.min(20,(caster.furnaceDust||0)+1);caster[cleave?'usedCleave':'usedDismantle']=true;}
    }
@@ -942,27 +989,42 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
   }
   effect(w,'red-blast',x,y,e.side,.8,{radius:180,fromX:e.x,fromY:e.y});
  }
+ function spatialSlash(w,e,aim){
+  const p=w.shoot(e,'world-slash',520,1050,32,{piercing:true,ignoreWalls:true,spread:0,bounces:0,life:2,angle:aim});
+  if(p)p.bypassInfinity=true;
+  effect(w,'world-cut',e.x,e.y,e.side,.8,{angle:aim});
+ }
  function openDomain(w,e){
   const spec={gojo:['void-domain',8,260,'无量空处'],sukuna:['shrine-domain',10,480,'伏魔御厨子'],yuji:['soul-domain',10,300,'未命名领域'],yuta:['love-domain',9,310,'真赝相爱'],jogo:['volcano-domain',9,300,'盖棺铁围山'],dagon:['ocean-domain',10,330,'荡蕴平线'],mahito:['mahito-domain',8,280,'自闭圆顿裹'],hakari:['gamble-domain',8,300,'坐杀博徒']}[e.fighter.role.id];
   if(!spec||e.isSummon||!e.alive||e.fighter.hp<=0||e.fighter.techniqueMutedUntil>w.time)return;
   if(w.fields.some(f=>isDomain(f)&&f.sourceFighterId===e.fighterId&&f.life>0))return;
   const [type,, ,name]=spec,[duration,radius]=Canon.domain(e.fighter.role.id,spec.slice(1,3));
   const gojo=type==='void-domain',scale=Math.min(1.4,Math.sqrt(w.size/620));
-  const f={id:w.nextId++,type,refinement:refinement[e.fighter.role.id]||3,sourceFighterId:e.fighterId,side:e.side,x:e.x,y:e.y,radius:radius*scale,life:duration,maxLife:duration,openAt:w.time+.55,clock:0,affected:new Set(),barrierHp:950,damageAtOpen:e.fighter.damageTaken||0};
+  const chosen=type==='love-domain'?w.nearest(e):null;
+  if(type==='love-domain'&&(!chosen||!canTarget({type},chosen)||!inside({x:e.x,y:e.y,radius:radius*scale},chosen)))return;
+  if(!spendDomain(w,e.fighter,gojo?32:type==='gamble-domain'?30:45))return;
+  const f={id:w.nextId++,type,refinement:refinement[e.fighter.role.id]||3,sourceFighterId:e.fighterId,side:e.side,x:e.x,y:e.y,radius:radius*scale,life:duration,maxLife:duration,openAt:w.time+.55,clock:0,affected:new Set(),barrierHp:950,damageAtOpen:e.fighter.damageTaken||0,domainCost:gojo?3:type==='gamble-domain'?2.5:4,sureTargetId:chosen?.id};
+  if(type==='love-domain'){
+   f.copySwords=Array.from({length:18},(_,i)=>{
+    const angle=i*2.399,distance=i===0?0:f.radius*.8*Math.sqrt(i/17);
+    const x=f.x+Math.cos(angle)*distance,y=f.y+Math.sin(angle)*distance;
+    return {x,y,angle,kind:w.random()<.5?'cursed-speech':'thin-ice',used:false};
+   }).filter(s=>Maps.isOpen(w.map,s.x,s.y,e.radius));
+  }
   w.techniqueUse?.(e);
-  w.fields.push(f);e.fighter.domainBuffUntil=type==='gamble-domain'?0:w.time+duration;
+  w.fields.push(f);
   e.domainCooldown=20;
   effect(w,['volcano-domain','ocean-domain','mahito-domain','gamble-domain'].includes(type)?'exp-domain-open':type==='soul-domain'?'soul-open':type==='love-domain'?'love-open':'domain-open',e.x,e.y,e.side,1.65,{gojo,radius:f.radius,text:name,style:type,sourceFighterId:e.fighterId});
   w.log('领域展开 · '+name,type==='gamble-domain'?'非致死规则领域，进行概率抽选，中奖后收起领域并自动修复。':['volcano-domain','ocean-domain','mahito-domain'].includes(type)?'封闭结界与术式必中；敌对领域交叠时必中抵消。':gojo?'封闭结界，灌入信息洪流；接触五条本人者免受信息影响。':type==='shrine-domain'?'开放结界，范围内连续必中斩击；斩击积累的粉尘强化竈。':type==='soul-domain'?'封闭空间，以灵魂解作必中。原作领域没有公布正式名称。':'结绳剑阵，选定邪去侮之梯作必中；领域交叠时抵消。',e.side);
  }
  function abilities(w,e,dt,damageFor){
   const f=e.fighter;if(!e.alive||f.hp<=0||f.isSummon)return;
-  if(f.techniqueMutedUntil>w.time){e.purpleChargeUntil=e.fireChargeUntil=0;return;}
   for(const key of ['blueCooldown','redCooldown','purpleCooldown','teleportCooldown','healCooldown','domainCooldown','fireCooldown'])e[key]-=dt;
   if(e.healCooldown<=0){
    e.healCooldown=6;const healed=w.heal(f,f.role.id==='gojo'?135:155);
    if(healed>0){effect(w,'reverse-heal',e.x,e.y,e.side,.9);w.log('反转术式',f.role.name+' 恢复 '+Math.round(healed)+' HP。',e.side);}
   }
+  if(f.techniqueMutedUntil>w.time){e.purpleChargeUntil=e.fireChargeUntil=e.spatialUntil=0;return;}
   const target=w.nearest(e);if(!target)return;
   if(e.domainCooldown<=0)openDomain(w,e);
   if(f.role.id==='gojo'){
@@ -1015,10 +1077,18 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
    const adapted=f.spaceSlashLearned;
    if(adapted&&!e.worldSlashUsed){
     e.worldSlashUsed=true;
-    const p=w.shoot(e,'world-slash',520,1050,32,{piercing:true,ignoreWalls:true,spread:0,bounces:0,life:2});
-    if(p){p.bypassInfinity=true;p.guaranteed=false;p.homing=false;}
-    effect(w,'world-cut',e.x,e.y,e.side,.8,{angle:Math.atan2(target.y-e.y,target.x-e.x)});
-    w.log('以魔虚罗为范本 · 斩断空间','魔虚罗适应无下限后，宿傩获得一次贯穿空间的斩击。',e.side);
+    e.spatialReady=w.time+9;
+    spatialSlash(w,e,Math.atan2(target.y-e.y,target.x-e.x));
+    w.log('以魔虚罗为范本 · 斩断空间','首次以束缚省略准备，后续需完成掌印、咏唱与定向。',e.side);
+   }else if(adapted&&e.spatialUntil&&w.time>=e.spatialUntil){
+    e.spatialUntil=0;
+    spatialSlash(w,e,e.spatialAim);
+   }else if(adapted&&!e.spatialUntil&&e.spatialReady<=w.time&&!e.fireChargeUntil){
+    e.spatialReady=w.time+10;
+    e.spatialUntil=w.time+.9;
+    e.spatialAim=Math.atan2(target.y-e.y,target.x-e.x);
+    effect(w,'nine-warning',e.x,e.y,e.side,.9,{kind:'world-slash',roleId:'sukuna',shape:'line',
+     angle:e.spatialAim,follow:e.id,length:2100,half:32,ignoreWalls:true,essential:true});
    }
   }
  }
@@ -1031,7 +1101,7 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
   }
   effect(w,p.furnace?'furnace-explosion':'fire-explosion',x,y,p.side,1.2,{radius:p.explosion,single:p.singleVictimId!==undefined});
  }
- return{isDomain,active,prepare,field,sureHit,contestedAt,canTarget,refinement,collapse,intercept,blocksContact,stop,abilities,openDomain,detonate,effect};
+ return{isDomain,active,prepare,field,guarded,defendDomain,spendDomain,recoverDomains,takeCopySword,contestedAt,canTarget,refinement,collapse,intercept,blocksContact,stop,abilities,openDomain,detonate,effect};
 });
 </script><script>(function(root,factory){
  const api=factory(typeof module==='object'&&module.exports?require('./maps'):root.PinkMaps,typeof module==='object'&&module.exports?require('./jujutsu'):root.PinkJujutsu,typeof module==='object'&&module.exports?require('./canon-heroes'):root.PinkCanon);
@@ -1072,7 +1142,7 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
  }
  function spawn(w,e){
   if(e.fighter.role.id==='yuta'&&!e.isSummon){
-   const r=summonRika(w,e);if(r)w.log('里香 · 协同','支付 450 HP，里香以独立 900 HP 显现。完全显现的五分钟压缩为十秒。',e.side);
+   const r=summonRika(w,e);if(r)w.log('里香 · 协同','支付 450 HP，里香以独立 900 HP 显现。',e.side);
   }
  }
  function hit(w,e,t,base,type,damageFor,context){
@@ -1099,9 +1169,6 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
      }
      J.effect(w,'jacob-ladder',charge.x,charge.y,e.side,.85,{radius:105});
     }
-   }
-   if(e.fighter.role.id==='yuji'&&!e.heldBy&&!(e.stunUntil>w.time)&&!(e.gameUntil>w.time)&&!muted(w,e)&&w.time>=e.simpleReady&&w.fields.some(d=>J.active(w,d)&&d.side!==e.side&&Math.hypot(d.x-e.x,d.y-e.y)<d.radius)){
-    e.simpleReady=w.time+9;e.simpleUntil=w.time+3;effect(w,'simple-open',e,{},.8);w.log('简易领域','虎杖抵挡领域必中与信息封锁三秒；仍可被直接攻击。',e.side);
    }
    if(e.fighter.role.id==='toji'&&e.burstUntil&&e.burstUntil<=w.time){
     const speed=Math.hypot(e.vx,e.vy)||1;e.vx=e.vx/speed*250;e.vy=e.vy/speed*250;e.burstUntil=0;
@@ -1164,15 +1231,17 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
    const r=w.entities.find(a=>a.alive&&a.kind==='rika'&&a.fighter.ownerId===e.fighterId);
    if(r&&time>=e.manifestReady&&!e.manifestUsed){
     e.manifestUsed=true;e.manifestUntil=r.fullUntil=time+Canon.settings.fullRikaSeconds;effect(w,'rika-manifest',r,{ownerId:e.id},1.2);
-    w.log('里香 · 完全显现','十秒协同窗口，里香获得咒力炮；本人保留限定的复制术式。',e.side);
+    w.log('里香 · 完全显现','五分钟协同窗口，里香获得咒力炮；本人可使用已复制的术式。',e.side);
    }
-   const copying=e.manifestUntil>time||w.fields.some(d=>J.active(w,d)&&d.sourceFighterId===e.fighterId);
-   if(copying&&time>=e.speechReady&&clear(w,e,t,330)){
+   const copying=e.manifestUntil>time;
+   const sword=!copying&&time>=(e.copySwordReady||0)&&clear(w,e,t,330)?J.takeCopySword(w,e):null;
+   if(sword)e.copySwordReady=time+.75;
+   if(sword==='cursed-speech'||copying&&time>=e.speechReady&&clear(w,e,t,330)){
     e.speechReady=time+6;
     const paid=hit(w,e,t,72,'cursed-speech',damageFor);
     if(paid>0){w.applyControl(t,t.fighter.role.hero?.55:.7);effect(w,'cursed-speech',t,{side:e.side,text:'别动'},.7);}
    }
-   if(copying&&time>=e.skyReady){
+   if(sword==='thin-ice'||copying&&time>=e.skyReady){
     e.skyReady=time+5;w.shoot(e,'thin-ice',175,570,25,{piercing:true,bounces:0,life:1.5,spread:0});
    }
    if(copying&&time>=e.ladderReady&&clear(w,e,t,420)){
@@ -1512,10 +1581,16 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
   let best=null,min=Infinity;
   for(const t of w.targets(e.side)){
    if(!accept(t))continue;
+   if(t.id===e.aiTarget)return t;
    const d=(t.x-e.x)**2+(t.y-e.y)**2;
    if(d<min||(d===min&&t.id<best.id)){best=t;min=d;}
   }
   return best;
+ }
+ function blocksCourtDamage(w,source,target){
+  if(!target||!affected(w,target))return false;
+  const court=target.nineTrial;
+  return w.entities.some(e=>e.fighterId===source.id&&e.nineTrial===court&&e.alive);
  }
  function meleeTarget(w,e,reach){return sortEnemy(w,e,t=>within(e,t,reach)&&visible(w,e,t));}
  function init(w,e){
@@ -1921,7 +1996,7 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
   status(w,t,'trial-hearing',1.6,'审理');
   J.effect(w,'nine-court',e.x,e.y,e.side,1.6,{kind:'trial-open',roleId:'higuruma',sourceId:e.id,targetId:t.id});
   J.effect(w,'nine-domain-open',e.x,e.y,e.side,1.25,{text:'诛伏赐死',sourceFighterId:e.fighterId});
-  w.log('领域展开 · 诛伏赐死','只暂停日车与被告的新攻击，其他战斗继续。',e.side);
+  w.log('领域展开 · 诛伏赐死','庭审期间日车与被告之间禁止暴力，场外战斗继续。',e.side);
  }
  function makeField(w,e,type,x,y,radius,life,extra={}) {
   const f={id:w.nextId++,type,sourceFighterId:e.fighterId,side:e.side,x,y,radius,life,maxLife:life,...extra};
@@ -2016,8 +2091,9 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
    case 'frame-charge':
     s.move={kind:'frame',angle:a.theta,remaining:145,pace:660};break;
    case 'naoya-open':
+    if(!J.spendDomain(w,e.fighter))break;
     makeField(w,e,'naoya-domain',a.x,a.y,205,5.5,{refinement:J.refinement.naoya,openAt:w.time,clock:0,
-     affected:new Set(),barrierHp:950,damageAtOpen:e.fighter.damageTaken||0,frames:new Map()});
+     affected:new Set(),barrierHp:950,damageAtOpen:e.fighter.damageTaken||0,frames:new Map(),domainCost:4});
     J.effect(w,'nine-domain-open',a.x,a.y,e.side,1.2,{text:'时胞月宫殿',sourceFighterId:e.fighterId});
     w.log('领域展开 · 时胞月宫殿','闭域中累计移动触发失帧；领域交叠可抵消。',e.side);break;
   }
@@ -2083,7 +2159,7 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
  function domainPulse(w,f,source,value) {
   if(source.techniqueMutedUntil>w.time)return;
   for(const t of w.targets(f.side)){
-   if(!within(f,t,f.radius)||!J.canTarget(f,t)||J.contestedAt(w,f,t))continue;
+   if(!within(f,t,f.radius)||!J.canTarget(f,t)||J.contestedAt(w,f,t)||J.guarded(w,t))continue;
    let s=f.frames.get(t.id);
    if(!s){s={ready:w.time,distance:0};f.frames.set(t.id,s);}
    if(s.ready>w.time)continue;
@@ -2122,7 +2198,7 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
   if(t){e.cooldown=.9;hit(w,e,t,65,'nine-bare',value);}
   return true;
  }
- return {roles,init,attack,fallback,motion,afterMove,affected,guard,onDamage,projectileHit,field,domainPulse,speedFactor};
+ return {roles,init,attack,fallback,motion,afterMove,affected,blocksCourtDamage,guard,onDamage,projectileHit,field,domainPulse,speedFactor};
 });
 </script><script>(function(root, factory) {
   const api = factory(typeof module==='object'&&module.exports?require('./maps.js'):root.PinkMaps,typeof module==='object'&&module.exports?require('./campaign.js'):root.PinkCampaign,typeof module==='object'&&module.exports?require('./ai.js'):root.PinkAI,typeof module==='object'&&module.exports?require('./hero-plus.js'):root.PinkHeroesPlus,typeof module==='object'&&module.exports?require('./jujutsu.js'):root.PinkJujutsu,typeof module==='object'&&module.exports?require('./jujutsu-trio.js'):root.PinkJujutsuTrio,typeof module==='object'&&module.exports?require('./heroes-expansion.js'):root.PinkExpansion,typeof module==='object'&&module.exports?require('./nine-heroes.js'):root.PinkNine,typeof module==='object'&&module.exports?require('./canon-heroes.js'):root.PinkCanon);
@@ -2216,7 +2292,8 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
     if(role.id==='xiaoyi')role.description='开局消耗 100 HP 放出独立 200 HP 的大顺，沿物理轨迹反弹，接近敌人时撕咬。小艺自身带有较低碰撞伤害，主人退场不会连带击杀大顺。';
     if(role.id==='wumian_solo')role.description='消耗生命召唤三位独立血量 AI：GPT 五发弹幕，豆包强化追踪光球，DeepSeek 穿墙穿透射线。本人投掷追踪提问弹、减伤并定期回血，助手自动修复，缺席时付费补召。';
   }
-  const powerFor=f=>(POWER[f.role.id]||1)*(f.teamScale||1)*(f.damageScale||1)*(f.role.boss&&f.phase?1.18:1)*(f.domainBuffUntil>f.worldTime?1.12:1);
+  const powerFor=f=>(POWER[f.role.id]||1)*(f.teamScale||1)*(f.damageScale||1)*(f.role.boss&&f.phase?1.18:1)*
+    (f.soulFractureUntil>f.worldTime?.73:1);
   const attackValue=(f,base)=>Math.max(1,base*powerFor(f)-(f.attackLoss||0));
   function randomGenerator(seed) {
     let s = seed >>> 0;
@@ -2234,7 +2311,7 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
       if(!['pvp','campaign','five'].includes(this.mode))throw Error('无效模式');
       this.partySizes=[leftList.length,this.mode==='campaign'?leftList.length:rightList.length];
       if(leftList.length<1||rightList.length<1)throw Error('双方至少各需要一名角色');
-      this.ai={enabled:false,level:'normal',decisions:0,dodges:0,supports:0};
+      this.ai={enabled:options.targeting!==false,level:options.aiLevel||'normal',decisions:0};
       this.attachments=[];this.matchScore=[0,0];
       const roleId=v=>typeof v==='string'?v:v.id;
       for(const entry of [...leftList,...rightList]){const id=roleId(entry);if(!allRoleById[id]||(this.mode!=='campaign'&&Campaign.npcById[id]))throw Error('无效角色');}
@@ -2316,6 +2393,8 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
     beginDrawing(e) {e.drawTotal=.65+this.random()*3.05;e.drawLeft=e.drawTotal;e.progress=0;}
     targets(side) {return this.entities.filter(e=>e.alive&&!e.heldBy&&e.side!==side);}
     nearest(e) {
+      const locked=AI.locked(this,e);
+      if(locked)return locked;
       let result=null,near=Infinity;for(const target of this.entities){if(!target.alive||target.heldBy||target.side===e.side)continue;const d=(target.x-e.x)**2+(target.y-e.y)**2;if(d<near){near=d;result=target;}}return result;
     }
     shoot(e,type,damage,speed,radius,options={}) {
@@ -2323,9 +2402,8 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
       if(!e.isSummon&&Canon.techniqueTypes.has(type))this.techniqueUse(e);
       const spread=(this.random()-.5)*((options.spread===undefined?.15:options.spread)+(e.fighter.statuses.vision?.65:0));
       const a=(options.angle??Math.atan2(target.y-e.y,target.x-e.x))+spread+(options.angleOffset||0);
-      const sureDomain=Jujutsu.sureHit(this,e.fighter,target),guaranteed=!!sureDomain;
-      this.projectiles.push({id:this.nextId++,side:e.side,source:e.id,sourceFighterId:e.fighterId,type,damage:attackValue(e.fighter,damage),radius,x:e.x,y:e.y,castX:e.x,castY:e.y,guaranteed,vx:Math.cos(a)*speed,vy:Math.sin(a)*speed,life:options.life||3.3,age:0,bounces:options.bounces===undefined?1:options.bounces,rotation:this.random()*6.28,quality:options.quality||0,text:options.text||'',trail:[],dead:false,targetId:target.id,piercing:!!options.piercing,ignoreWalls:!!options.ignoreWalls||guaranteed,hitIds:new Set(),homing:!!options.homing||guaranteed,slow:options.slow||0,stunChance:options.stunChance||0,stunDuration:options.stunDuration||.5,trailClock:0,paintColor:options.paintColor||'#bfa0dc',explosion:options.explosion||0});
-      const projectile=this.projectiles.at(-1);projectile.domainFieldId=sureDomain?.id;
+      this.projectiles.push({id:this.nextId++,side:e.side,source:e.id,sourceFighterId:e.fighterId,type,damage:attackValue(e.fighter,damage),radius,x:e.x,y:e.y,guaranteed:false,vx:Math.cos(a)*speed,vy:Math.sin(a)*speed,life:options.life||3.3,age:0,bounces:options.bounces===undefined?1:options.bounces,rotation:this.random()*6.28,quality:options.quality||0,text:options.text||'',trail:[],dead:false,targetId:target.id,piercing:!!options.piercing,ignoreWalls:!!options.ignoreWalls,hitIds:new Set(),homing:!!options.homing,slow:options.slow||0,stunChance:options.stunChance||0,stunDuration:options.stunDuration||.5,trailClock:0,paintColor:options.paintColor||'#bfa0dc',explosion:options.explosion||0});
+      const projectile=this.projectiles.at(-1);
       projectile.castToken=`${type}:${this.time}`;projectile.distanceLeft=options.maxDistance;
       e.visualAttackAt=this.time;e.visualAttackKind=type;e.visualAttackAngle=a;
       e.fighter.shots++;this.effects.push({type:'cast',x:e.x,y:e.y,angle:a,sourceId:e.id,sourceFighterId:e.fighterId,side:e.side,roleId:e.fighter.role.id,kind:type,life:.3,maxLife:.3});return projectile;
@@ -2333,6 +2411,8 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
     damage(sideIndex,amount,entity,position,type,sourceFighter=null,context=null){
       const target=entity?.fighter||position?.fighter||this.sides[sideIndex].members.find(f=>f.hp>0);if(!target||target.hp<=0)return 0;
       const body=entity||this.entities.find(e=>e.alive&&e.fighterId===target.id);
+      if(context?.sureHit&&Jujutsu.guarded(this,body))return 0;
+      if(sourceFighter&&Nine.blocksCourtDamage(this,sourceFighter,body))return 0;
       if(amount>0)Heroes.adapt(this,body,type);
       if(target.invulnerableUntil>this.time)return 0;
       if(Jujutsu.blocksContact(this,body,type,context)){
@@ -2354,7 +2434,6 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
       const force=Canon.force(sourceFighter?.role.id,type);
       let scaled=['sale','purchase','disease','burn','terrain'].includes(type)?amount:amount*armor*force;
       scaled*=Heroes.mitigation(body,type)*Expansion.damageScale(this,body,type,context);
-      if(body?.simpleUntil>this.time&&(context?.sureHit||Jujutsu.isDomain({type})))scaled*=.35;
       if(!target.isSummon&&type!=='terrain'&&!context?.globalHazard){if(target.role.id==='gojo')scaled*=.85;if(target.role.id==='wumian_solo')scaled*=.82;}
       if(type!=='terrain'&&!context?.globalHazard&&sourceFighter?.index!==sideIndex)scaled=Nine.guard(this,body,scaled,context);
       if(context?.execution)scaled=target.hp;
@@ -2363,6 +2442,10 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
       const actual=Math.min(Math.max(0,scaled),target.hp);if(actual<=0){if(needsRitual)Heroes.ritual(this,target,body);return 0;}
       target.hp=Math.max(0,target.hp-actual);
       target.damageTaken=(target.damageTaken||0)+actual;
+      if(sourceFighter?.role.id==='yuji'&&target.role.id==='sukuna'&&!target.isSummon&&
+          (type==='soul-cut'||type==='soul-domain')){
+        target.soulFractureUntil=this.time+3;
+      }
       if(sourceFighter?.role.id==='sukuna'&&!sourceFighter.isSummon&&['slash','cleave'].includes(type)){
         const caster=this.entities.find(e=>e.fighterId===sourceFighter.id&&e.alive);
         if(caster){caster.slashMarks=(caster.slashMarks||0)+1;caster[type==='slash'?'usedDismantle':'usedCleave']=true;}
@@ -2402,7 +2485,7 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
     attack(e,dt) {
       const side=e.fighter,role=side.role.id;
       if(Nine.affected(this,e)||Nine.fallback(this,e,dt,attackValue)||Nine.attack(this,e,dt,attackValue))return;
-      if(e.stunUntil>this.time||e.heldBy||e.gameUntil>this.time||e.voidLocked||side.hp<=0)return;
+      if(e.stunUntil>this.time||e.heldBy||e.gameUntil>this.time||e.voidLocked||e.hollowWickerUntil>this.time||side.hp<=0)return;
       if(e.kind==='dragon')return;
       if(Expansion.attack(this,e,dt,attackValue))return;
       if(Trio.attack(this,e,dt,attackValue))return;
@@ -2743,7 +2826,10 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
           }
         }
         const factor=ground.speed*(e.leafUntil>this.time?.65:1)*(e.slowUntil>this.time?.65:1)*(f.statuses.clog?.78:1)*Nine.speedFactor(this,e),voluntary=stunned?0:1,playing=e.gameUntil>this.time||e.voidLocked;
-        if(!Nine.motion(this,e,dt,attackValue)&&!playing){e.x+=(e.vx*factor*voluntary+e.envVx+ground.flowX)*dt;e.y+=(e.vy*factor*voluntary+e.envVy+ground.flowY)*dt;}
+        if(!Nine.motion(this,e,dt,attackValue)&&!playing){
+          if(!stunned&&!(e.charmUntil>this.time)&&!Nine.affected(this,e))AI.steer(this,e,dt,ground);
+          e.x+=(e.vx*factor*voluntary+e.envVx+ground.flowX)*dt;e.y+=(e.vy*factor*voluntary+e.envVy+ground.flowY)*dt;
+        }
         for(const obstacle of this.map.obstacles){const push=Maps.circlePush(obstacle,e.x,e.y,RADIUS);if(push){e.x+=push.nx*push.push;e.y+=push.ny*push.push;const velocity=e.vx*push.nx+e.vy*push.ny;if(velocity<0){e.vx-=2*velocity*push.nx;e.vy-=2*velocity*push.ny;}const env=e.envVx*push.nx+e.envVy*push.ny;if(env<0){e.envVx-=1.4*env*push.nx;e.envVy-=1.4*env*push.ny;}}}
         this.clampBody(e);
       }
@@ -2764,23 +2850,6 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
     moveProjectiles(dt){
       for(const p of this.projectiles){
         if(p.dead)continue;p.age+=dt;p.life-=dt;if(p.life<=0&&p.distanceLeft===undefined){if(p.explosion)Jujutsu.detonate(this,p,p.x,p.y,attackValue);p.dead=true;continue;}const ox=p.x,oy=p.y;
-        if(p.guaranteed){const target=this.entities.find(e=>e.id===p.targetId&&e.alive);if(!target||!Jujutsu.sureHit(this,this.fighterById[p.sourceFighterId],target)){p.guaranteed=false;p.homing=false;}}
-        // A domain's sure-hit is a short, visible locked trajectory, not ordinary
-        // homing (which can miss or be blocked by terrain).
-        if(p.guaranteed){
-          const target=this.entities.find(e=>e.id===p.targetId&&e.alive&&!e.heldBy&&e.side!==p.side);
-          if(target){
-            const progress=Math.min(1,p.age/.16);p.x=p.castX+(target.x-p.castX)*progress;p.y=p.castY+(target.y-p.castY)*progress;
-            p.trail.push({x:ox,y:oy});if(p.trail.length>9)p.trail.shift();
-            if(progress>=1){
-              const source=this.fighterById[p.sourceFighterId];this.damage(target.side,p.damage,target,target,p.type,source,{sureHit:true,projectile:true,castToken:p.castToken,impactAngle:Math.atan2(target.y-oy,target.x-ox)});p.hitIds.add(target.id);
-              this.effects.push({type:'domain-hit',x:target.x,y:target.y,side:p.side,life:.45,maxLife:.45});
-              p.guaranteed=false;if(!p.piercing)p.dead=true;
-            }
-            continue;
-          }
-          p.guaranteed=false;
-        }
         if(!p.ignoreWalls){const g=Maps.gravityAt(this.map,p.x,p.y);p.vx+=g.x*dt;p.vy+=g.y*dt;}
         if(p.homing){let target=this.entities.find(e=>e.id===p.targetId&&e.alive);if(!target)target=this.targets(p.side)[0];if(target){const distance=Math.hypot(target.x-p.x,target.y-p.y)||1,speed=Math.hypot(p.vx,p.vy);p.vx+=(speed*(target.x-p.x)/distance-p.vx)*Math.min(1,dt*5);p.vy+=(speed*(target.y-p.y)/distance-p.vy)*Math.min(1,dt*5);const v=Math.hypot(p.vx,p.vy)||1;p.vx*=speed/v;p.vy*=speed/v;}}
         const stepLength=Math.hypot(p.vx,p.vy)*dt, part=p.distanceLeft===undefined?1:Math.min(1,p.distanceLeft/(stepLength||1));
@@ -2825,8 +2894,13 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
       if(this.done)return;
       if(!(dt>0&&dt<=.1))throw Error('Use a fixed step of at most 0.1 seconds');
       this.time+=dt;
-      this.specialTransitions();this.tickUnitSkills(dt);this.updateBossPhases();this.tickStatuses(dt);Jujutsu.prepare(this);this.moveBodies(dt);this.tickFields(dt);this.tickTerrain(dt);
-      for(const e of this.entities)if(e.alive)this.attack(e,dt);
+      this.specialTransitions();
+      Jujutsu.recoverDomains(this,dt);
+      for(const e of this.entities)if(e.alive)AI.refresh(this,e);
+      this.tickUnitSkills(dt);this.updateBossPhases();this.tickStatuses(dt);
+      for(const e of this.entities)if(e.alive&&!Nine.affected(this,e))Jujutsu.defendDomain(this,e);
+      Jujutsu.prepare(this);this.moveBodies(dt);this.tickFields(dt);this.tickTerrain(dt);
+      for(const e of this.entities)if(e.alive){AI.refresh(this,e);this.attack(e,dt);}
       this.moveProjectiles(dt);
       for(const f of this.effects)f.life-=dt;
       const effects=this.effects.filter(f=>f.life>0);
@@ -2838,7 +2912,7 @@ return{CHAPTERS,NPCS,npcById,LEVELS,getLevel};
       return{id:this.id,mode:this.mode,ai:{...this.ai},matchScore:[...this.matchScore],scoreboard:this.mode==='five'?this.scoreTable():null,attachments:this.attachments.length,level:this.level,size:this.size,map:this.map.id,seed:this.seed,time:this.time,duration:this.duration,done:this.done,winner:this.winner,reason:this.reason,
         sides:this.sides.map(s=>({hp:s.hp,maxHp:s.maxHp,scoreHp:s.scoreHp,damage:s.damage,hits:s.hits,shots:s.shots,aliveCount:s.aliveCount,members:s.members.map(f=>f.id)})),
         fighters:this.fighters.map(f=>({id:f.id,team:f.index,originalTeam:f.originalTeam,role:f.role.id,npc:!!f.role.npc,boss:!!f.role.boss,isSummon:f.isSummon,ownerId:f.ownerId,hp:f.hp,maxHp:f.maxHp,damage:f.damage,hits:f.hits,shots:f.shots,phase:f.phase,statuses:{...f.statuses},spent:f.spent,summonSpent:f.summonSpent,attackLoss:f.attackLoss,traitorSwitched:f.traitorSwitched,sales:f.sales,lastPrice:f.lastPrice,dashes:f.dashes,stuns:f.stuns,diseaseApplications:f.diseaseApplications})),
-        entities:this.entities.map(e=>({id:e.id,fighterId:e.fighterId,ownerId:e.fighter.ownerId,side:e.side,skin:e.skin,kind:e.kind,radius:e.radius,alive:e.alive,isSummon:e.isSummon,x:e.x,y:e.y,vx:e.vx,vy:e.vy,envVx:e.envVx,envVy:e.envVy,groundKinds:e.groundKinds,hp:e.fighter.hp,maxHp:e.fighter.maxHp,localHp:e.isSummon?e.localHp:null,progress:e.progress,drawTotal:e.drawTotal,stunUntil:e.stunUntil,slowUntil:e.slowUntil,controlImmuneUntil:e.controlImmuneUntil,heldBy:e.heldBy,swallowUntil:e.swallowUntil,gameUntil:e.gameUntil,jetLeft:e.jetLeft,charmUntil:e.charmUntil||0,leafUntil:e.leafUntil||0,aiAction:e.aiAction||'',adaptation:e.fighter.adaptation||{},invulnerableUntil:e.fighter.invulnerableUntil||0})),fields:this.fields.map(f=>({type:f.type,x:f.x,y:f.y,radius:f.radius,life:f.life,side:f.side})),projectiles:this.projectiles.length};
+        entities:this.entities.map(e=>({id:e.id,fighterId:e.fighterId,ownerId:e.fighter.ownerId,side:e.side,skin:e.skin,kind:e.kind,radius:e.radius,alive:e.alive,isSummon:e.isSummon,x:e.x,y:e.y,vx:e.vx,vy:e.vy,envVx:e.envVx,envVy:e.envVy,groundKinds:e.groundKinds,hp:e.fighter.hp,maxHp:e.fighter.maxHp,localHp:e.isSummon?e.localHp:null,progress:e.progress,drawTotal:e.drawTotal,stunUntil:e.stunUntil,slowUntil:e.slowUntil,controlImmuneUntil:e.controlImmuneUntil,heldBy:e.heldBy,swallowUntil:e.swallowUntil,gameUntil:e.gameUntil,jetLeft:e.jetLeft,charmUntil:e.charmUntil||0,leafUntil:e.leafUntil||0,aiAction:e.aiAction||'',aiTarget:AI.locked(this,e)?.id??null,adaptation:e.fighter.adaptation||{},invulnerableUntil:e.fighter.invulnerableUntil||0})),fields:this.fields.map(f=>({type:f.type,x:f.x,y:f.y,radius:f.radius,life:f.life,side:f.side})),projectiles:this.projectiles.length};
     }
 
   }
@@ -3366,16 +3440,14 @@ root.PinkArt={paintMap,motion,npcIcon,drawNPC,thumbnail};
    for(let i=0;i<20;i++){const a=i*2.399+time*.05,d=r*(.25+(i%6)*.12);line(c,Math.cos(a)*d,Math.sin(a)*d,Math.cos(a)*d+9,Math.sin(a)*d-8,'#efaba570',1.5);}
    circle(c,0,0,Math.max(2,r*.33),null,'#e2a19445',1);
   }else{
-   for(let i=0;i<28;i++){
-    const a=i*2.399,d=r*Math.sqrt((i+1)/29),x=Math.cos(a)*d,y=Math.sin(a)*d;
-    sword(c,x,y,-.2+(i%3)*.16,.65);
+   for(const item of f.copySwords||[]){
+    if(!item.used)sword(c,(item.x-f.x)*opening,(item.y-f.y)*opening,item.angle,.77);
    }
    for(let i=0;i<3;i++){
     c.save();c.rotate(i*TAU/3+time*.025);
     c.strokeStyle='#f6d7bc80';c.lineWidth=3;c.beginPath();c.moveTo(-r,-r*.3);
     c.bezierCurveTo(-r*.2,r*.5,r*.2,-r*.5,r,r*.3);c.stroke();c.restore();
    }
-   for(const a of [0,Math.PI/2,Math.PI,Math.PI*1.5]){sword(c,Math.cos(a)*r*.25,Math.sin(a)*r*.25,a+Math.PI/2,1.3);}
   }
   c.restore();c.restore();return true;
  }
@@ -5483,9 +5555,10 @@ function renderBattleHUD(){const w=state.world;if(!w)return;renderTerrainLegend(
 }
 function finishBattle(){if(resultShown||!state.world?.done)return;resultShown=true;state.phase='finished';const w=state.world,config=state.lastConfig,reward=profile.awardBattle({id:w.id,mode:w.mode,done:w.done,winner:w.winner,level:w.level});state.lastReward=reward;renderBattleHUD();const campaign=w.mode==='campaign',victory=w.winner===0,winners=w.winner===null?w.sides.map(s=>s.members[0]):w.sides[w.winner].members.slice(0,3);$('result-portraits').innerHTML=winners.map(f=>avatar(f.role)).join('');$('result-kicker').textContent=campaign?C.getLevel(w.level).name:w.winner===null?'势均力敌':w.winner===0?'草莓队 · 获胜':'葡萄队 · 获胜';$('result-title').textContent=campaign?(victory?'这一关，完成！':'再试一种搭配吧。'):w.winner===null?'平分秋色':w.winner===0?'草莓队获胜':'葡萄队获胜';$('result-summary').textContent=w.reason+' · 用时 '+w.time.toFixed(1)+' 秒';$('result-coins-value').textContent='+'+reward.coinsAdded;$('result-coins-value').nextElementSibling.textContent=reward.duplicate?'本局奖励已经领取':'金币已到账';$('result-primary').textContent=campaign&&victory&&w.level<50?'下一关':campaign?'再次挑战':'再来一局';$('result-secondary').textContent=campaign?'调整闯关队伍':'调整对战阵容';$('result-dialog').showModal();playTone(victory||!campaign?690:420,.2);}
 function returnToSetup(){if($('result-dialog').open)$('result-dialog').close();const config=state.lastConfig;state.phase='idle';if(config?.mode==='campaign'){state.level=config.level;state.chapter=C.getLevel(state.level).chapter;show('campaign');}else show('setup');}
+function updatedRules(){showInfo('玩法说明','<p><strong>物理反弹与索敌</strong>：人物与普通召唤物保持半径 26，沿物理轨迹移动，碰到墙壁、障碍物和其他单位后反弹。所有单位会主动锁定仍在场的敌人。近战角色会绕开可见障碍接近，远程角色会在合适距离横移并继续寻找射击线。眩晕、魅惑、吞噬、信息封锁和领域控制会优先接管移动。</p><p><strong>自由组队</strong>：回到组队界面后，两边都可以独立添加、移除和更换角色，不强制人数相同；同一角色可以重复上阵。随机匹配只显示己方阵容，敌方人数和角色在开战时生成。好友峡谷使用大地图和计分板。</p><p><strong>无时间上限</strong>：战斗时钟只显示已经进行的时间，不会因倒计时结束。只有一方全部退场，或闯关敌人全部被击败，才会正常结算。</p><p>闯关最多选择三名角色，五章共五十关；每章第 5、10 关出现首领。普通角色初始 1000 HP；召唤支付自身生命并获得独立血量，主人退场不会连带击杀召唤物。</p><p>地形会改变战斗：沙地和河流减速，水流与传送带推送，冰面更滑，熔岩造成灼烧，花圃恢复生命，引力井会影响角色和飞行物。普通对局结算 +20 金币，闯关结算 +100 金币。</p><p>英雄级角色按原作招式与定位进行游戏化还原，跨作品强度交互属于本作假设。原作依据、能力限制和未确定部分见角色资料说明。</p><p>空格暂停或继续，R 重开。打开战斗说明时自动暂停。进度和金币自动保存在当前浏览器。</p>');}
 $('start-match').onclick=startPvP;$('start-stage').onclick=startAdventure;$('battle-pause').onclick=togglePause;$('overlay-resume').onclick=resumeBattle;$('battle-restart').onclick=()=>{if(state.lastConfig)startBattle(state.lastConfig);};$('battle-speed').onclick=()=>{state.speed=state.speed===1?2:state.speed===2?4:1;renderBattleHUD();};$('battle-exit').onclick=returnToSetup;
 $('result-primary').onclick=()=>{const config=state.lastConfig,w=state.world;if(!config||!w)return;$('result-dialog').close();if(config.mode==='campaign'&&w.winner===0&&config.level<50){state.level=config.level+1;state.chapter=C.getLevel(state.level).chapter;startAdventure();}else startBattle(config);};$('result-secondary').onclick=returnToSetup;$('result-dialog').addEventListener('cancel',e=>{e.preventDefault();returnToSetup();});
-$('battle-help').onclick=rules;$('footer-rules').onclick=rules;$('battle-map-info').onclick=()=>{const map=state.world?.map;if(map)showInfo(map.name,'<p>'+esc(map.description)+'</p><div class="info-number-note">'+esc(map.tag||'关卡地形')+'</div><p style="margin-top:14px">障碍物会挡住普通飞行物，部分飞行物会反弹。沙地、河流、冰面、熔岩、花圃和重力效果在整个对局中持续生效。</p>');};
+$('battle-help').onclick=updatedRules;$('footer-rules').onclick=updatedRules;$('battle-map-info').onclick=()=>{const map=state.world?.map;if(map)showInfo(map.name,'<p>'+esc(map.description)+'</p><div class="info-number-note">'+esc(map.tag||'关卡地形')+'</div><p style="margin-top:14px">障碍物会挡住普通飞行物，部分飞行物会反弹。沙地、河流、冰面、熔岩、花圃和重力效果在整个对局中持续生效。</p>');};
 $('battle-log').onclick=()=>{const events=state.world?.events||[];showInfo('这一局的故事',events.slice(-45).reverse().map(e=>'<p><strong>'+format(Math.floor(e.time+1e-8))+' · '+esc(e.title)+'</strong><br>'+esc(e.text)+'</p>').join(''));};
 function playTone(freq,duration,voice='sine'){if(!state.sound||!audioContext||audioContext.state!=='running')return;const now=audioContext.currentTime;if(now-lastTone<.08)return;lastTone=now;const oscillator=audioContext.createOscillator(),gain=audioContext.createGain();oscillator.type=voice;oscillator.frequency.setValueAtTime(freq,now);oscillator.frequency.exponentialRampToValueAtTime(freq*.75,now+duration);gain.gain.setValueAtTime(.025,now);gain.gain.exponentialRampToValueAtTime(.0001,now+duration);oscillator.connect(gain);gain.connect(audioContext.destination);oscillator.start(now);oscillator.stop(now+duration);}
 $('battle-sound').onclick=async()=>{state.sound=!state.sound;$('battle-sound').setAttribute('aria-label',state.sound?'关闭音效':'开启音效');$('battle-sound').setAttribute('aria-pressed',String(state.sound));if(state.sound){try{audioContext=audioContext||new(window.AudioContext||window.webkitAudioContext)();await audioContext.resume();playTone(610,.09);}catch{state.sound=false;}}savePreferences();};document.addEventListener('click',event=>{

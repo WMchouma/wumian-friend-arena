@@ -36,3 +36,9 @@
 ## 继承素材
 
 其他 `assets/*.png` 和旧版 SVG 是既有项目素材，包括用户此前提供的图片。它们保持原状，来源不全者不新增授权声明。新增英雄入口均指向 `hero-*.svg`，旧版英雄图片仅为历史兼容保留。
+
+## 42 人对战版特效
+
+出招、命中和残影叠加在项目的 Canvas 绘制上。内嵌特效图集使用 Kenney / Kenney Vleugels 的 CC0 1.0 蒙版，来自 [Particle Pack](https://kenney.nl/assets/particle-pack)、[Smoke Particles](https://kenney.nl/assets/smoke-particles)、[Splat Pack](https://kenney.nl/assets/splat-pack)、[Foliage Sprites](https://kenney.nl/assets/foliage-sprites) 和 [Light Masks](https://kenney.nl/assets/light-masks)。
+
+咒术角色的技能轮廓参考 [VIZ 原作目录](https://www.viz.com/read/manga/jujutsu-kaisen/all) 和 [Bandai Namco 官方资料](https://www.bandainamcoent.com/games/jujutsu-kaisen-cursed-clash)，按游戏现有事件抽象绘制。
